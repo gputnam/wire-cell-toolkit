@@ -58,7 +58,7 @@ local er_params = [
 local params = base {
   files: super.files {
     fields: [ std.extVar('files_fields'), ],
-    chresp: "icarus-channel-responses-v1.json.bz2",
+    chresp: null,
   },
 
   rc_resp: if std.extVar('file_rcresp') != "" then
@@ -135,7 +135,7 @@ local wcls_output = {
     data: {
       // anode: wc.tn(tools.anode),
       anode: wc.tn(mega_anode),
-      digitize: true,  // true means save as RawDigit, else recob::Wire
+      digitize: false,  // true means save as RawDigit, else recob::Wire
       frame_tags: ['raw'],
       // nticks: params.daq.nticks,
       chanmaskmaps: ['bad'],
@@ -156,13 +156,37 @@ local wcls_output = {
       digitize: false,  // true means save as RawDigit, else recob::Wire
       // frame_tags: ['gauss', 'wiener', 'looseLf'],
       // frame_scale: [0.1, 0.1, 0.1],
-      frame_tags: ['looseLf'],
-      frame_scale: [0.009],
+      frame_tags: ['decon','looseLf', 'gauss', 'wiener', 'tightLf', 'cleanupROI', 'breakROI1', 'breakROI2', 'shrinkROI', 'extendROI'],
+      frame_scale: [0.009,0.009, 0.009, 0.009, 0.009, 0.009, 0.009, 0.009, 0.009],
       // nticks: params.daq.nticks,
       chanmaskmaps: [],
       nticks: -1,
     },
   }, nin=1, nout=1, uses=[mega_anode]),
+
+  h5io: g.pnode({
+      type: 'HDF5FrameTap',
+      name: 'hio_sp',
+      data: {
+        anode: wc.tn(mega_anode),
+        trace_tags: ['gauss'
+	, 'wiener'
+	, 'tightLf'
+	, 'looseLf'
+	, 'decon'
+        , 'cleanupROI'
+        , 'breakROI1'
+        , 'breakROI2'
+        , 'shrinkROI'
+        , 'extendROI'
+        ],
+        filename: "wc-sp-%d.h5" % volume,
+        chunk: [0, 0], // ncol, nrow
+        gzip: 2,
+        high_throughput: true,
+      },
+    }, nin=1, nout=1, uses=[mega_anode]),
+
 };
 
 // local perfect = import 'chndb-perfect.jsonnet';
@@ -178,7 +202,14 @@ local chndb = [{
 local nf_maker = import 'pgrapher/experiment/icarus/nf.jsonnet';
 local nf_pipes = [nf_maker(params, tools.anodes[n], chndb[n], tools, name='nf%d' % n) for n in std.range(0, std.length(tools.anodes) - 1)];
 
-local sp = sp_maker(params, tools, { sparse: sigoutform == 'sparse', use_roi_debug_mode: true, });
+local sp_override = { // assume all tages sets in base sp.jsonnet
+    sparse: sigoutform == 'sparse',
+    use_roi_refinement: true,
+    use_roi_debug_mode: true,
+    use_multi_plane_protection: true,
+    mp_tick_resolution: 10,
+};
+local sp = sp_maker(params, tools, sp_override);
 local sp_pipes = [sp.make_sigproc(a) for a in tools.anodes];
 
 local util = import 'pgrapher/experiment/icarus/funcs.jsonnet';
@@ -203,7 +234,7 @@ local nfsp_pipes = [
                chsel_pipes[n],
                // magnifyio.orig_pipe[n],
 
-               nf_pipes[n],
+               // nf_pipes[n],
                // magnifyio.raw_pipe[n],
 
                sp_pipes[n],
@@ -237,11 +268,17 @@ local fanin_tag_rules = [
               '.*': 'framefanin',
             },
             trace: {
+              ['extend_roi%d'%ind]:'extend_roi%d'%ind,
+              ['shrink_roi%d'%ind]:'shrink_roi%d'%ind,
+              ['break_roi_2nd%d'%ind]:'break_roi_2nd%d'%ind,
+              ['break_roi_1st%d'%ind]:'break_roi_1st%d'%ind,
+              ['cleanup_roi%d'%ind]:'cleanup_roi%d'%ind,
               ['gauss%d'%ind]:'gauss%d'%ind,
               ['wiener%d'%ind]:'wiener%d'%ind,
               ['threshold%d'%ind]:'threshold%d'%ind,
-              // ['tight_lf%d'%ind]:'tight_lf%d'%ind,
+              ['tight_lf%d'%ind]:'tight_lf%d'%ind,
               ['loose_lf%d'%ind]:'loose_lf%d'%ind,
+              ['decon%d'%ind]:'decon%d'%ind,
             },
 
           }
@@ -262,8 +299,14 @@ local retagger = g.pnode({
       merge: {
         'gauss\\d\\d\\d': 'gauss',
         'wiener\\d\\d\\d': 'wiener',
-        // 'tight_lf\\d\\d\\d': 'tightLf',
+        'tight_lf\\d\\d\\d': 'tightLf',
         'loose_lf\\d\\d\\d': 'looseLf',
+        'decon\\d\\d\\d': 'decon',
+        'cleanup_roi\\d\\d\\d': 'cleanupROI',
+        'break_roi_1st\\d\\d\\d': 'breakROI1',
+        'break_roi_2nd\\d\\d\\d': 'breakROI2',
+        'shrink_roi\\d\\d\\d': 'shrinkROI',
+        'extend_roi\\d\\d\\d': 'extendROI',
       },
     }],
   },
@@ -272,7 +315,7 @@ local retagger = g.pnode({
 local sink = g.pnode({ type: 'DumpFrames' }, nin=1, nout=0);
 
 
-local graph = g.pipeline([wcls_input.adc_digits, fanpipe, retagger, wcls_output.sp_signals, sink]);
+local graph = g.pipeline([wcls_input.adc_digits, fanpipe, retagger, wcls_output.h5io, wcls_output.sp_signals, sink]);
 
 local app = {
   type: 'Pgrapher',
